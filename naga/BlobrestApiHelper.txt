@@ -1,0 +1,1301 @@
+package com.ciphercloud.cloudapi.connectors.azureblob.utils;
+
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.TimeZone;
+import java.util.stream.Collectors;
+
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.http.Header;
+import org.apache.http.HttpEntity;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.methods.HttpDelete;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpHead;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.client.methods.HttpPut;
+import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.http.entity.ContentType;
+import org.apache.http.entity.StringEntity;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Scope;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Component;
+
+import com.ciphercloud.cloudapi.exceptions.RestApiException;
+import com.ciphercloud.cloudapi.model.CapsApiContext;
+import com.ciphercloud.cloudapi.model.CloudResponse;
+import com.ciphercloud.cloudapi.model.response.ApiErrorResponse;
+import com.ciphercloud.cloudapi.model.response.event.Ancestors;
+import com.ciphercloud.cloudapi.model.response.event.FileInfo;
+import com.ciphercloud.cloudapi.model.response.event.SharedLinkInfo;
+import com.ciphercloud.cloudapi.model.response.storage.StorageListFileMetadataResponse;
+import com.ciphercloud.cloudapi.services.ICloudApiServices.AuthTokenType;
+import com.ciphercloud.cloudapi.services.ICloudApiServicesV2;
+import static com.ciphercloud.cloudapi.connectors.azureblob.utils.BlobStorageConstants.SEPARATOR;
+import static com.ciphercloud.cloudapi.connectors.azureblob.utils.BlobStorageConstants.FILE_SEPARATOR;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.xml.XmlMapper;
+
+import lombok.NonNull;
+import lombok.extern.slf4j.Slf4j;
+import net.minidev.json.JSONArray;
+import net.minidev.json.JSONObject;
+import net.minidev.json.parser.JSONParser;
+
+/**
+ * @author anumolu.nageswarrao
+ *
+ */
+@Component
+@Scope("singleton")
+@Slf4j
+public class BlobRestApiHelper {
+	
+	@Autowired
+	private ICloudApiServicesV2 cloudApiServicesV2;
+	
+	private static Set<String> qualifiedEvents = new HashSet<String>();
+	
+	private static String events = "Microsoft.Storage/storageAccounts/delete$#$Delete Storage Account,Microsoft.Storage/storageAccounts/write$#$Create/Update Storage Account,Microsoft.Storage/storageAccounts/blobServices/containers$#$Put blob container,Microsoft.Storage/storageAccounts/blobServices/containers/write$#$Put blob container,Microsoft.Storage/storageAccounts/blobServices/containers/delete$#$Delete blob container,Microsoft.EventGrid/eventSubscriptions/write$#$Write EventSubscription";
+	
+    /**
+     * @param capsApiContext
+     * @param request
+     * @param accountId
+     * @param tokenType
+     * @return
+     * @throws RestApiException
+     */
+    public JSONObject executeCloudRequestV2AndParseJson(CapsApiContext capsApiContext, HttpUriRequest request, long accountId, AuthTokenType tokenType) throws RestApiException {
+        return parseToJSON(cloudApiServicesV2.executeCloudRequestV2(capsApiContext, request, accountId, tokenType));
+    }
+    
+    /**
+     * @param capsApiContext
+     * @param request
+     * @param accountId
+     * @param tokenType
+     * @return
+     * @throws RestApiException
+     */
+    public JSONObject executeCloudRequestV2AndParseXMLToJson(CapsApiContext capsApiContext, HttpUriRequest request, long accountId, AuthTokenType tokenType) throws RestApiException {
+        return parseXMLToJSON(cloudApiServicesV2.executeCloudRequestV2(capsApiContext, request, accountId, tokenType));
+    }
+	    
+    /**
+     * @param capsApiContext
+     * @param request
+     * @param accountId
+     * @param tokenType
+     * @return
+     * @throws RestApiException
+     */
+    public JSONArray executeCloudRequestV2AndParseJsonArray(CapsApiContext capsApiContext, HttpUriRequest request, long accountId, AuthTokenType tokenType) throws RestApiException{
+        return parseToJSONArray(cloudApiServicesV2.executeCloudRequestV2(capsApiContext, request, accountId, tokenType));
+    }
+
+    /**
+     * @param capsApiContext
+     * @param request
+     * @param accountId
+     * @param tokenType
+     * @return
+     * @throws RestApiException
+     */
+    public CloudResponse executeCloudRequestV2(CapsApiContext capsApiContext, HttpUriRequest request, long accountId, AuthTokenType tokenType) throws RestApiException {
+        return cloudApiServicesV2.executeCloudRequestV2(capsApiContext, request, accountId, tokenType);
+    }
+
+    /**
+     * @param capsApiContext
+     * @param request
+     * @param accountId
+     * @param tokenType
+     * @return
+     * @throws RestApiException
+     */
+    public HttpResponse executeCloudDownloadRequestV2(CapsApiContext capsApiContext, HttpUriRequest request, long accountId, AuthTokenType tokenType) throws RestApiException {
+        return cloudApiServicesV2.executeCloudDownloadRequestV2RawResponse(capsApiContext, request, accountId, tokenType,null);
+    }
+    
+    /**
+     * @param response
+     * @return
+     * @throws RestApiException
+     */
+    public JSONObject parseToJSON(CloudResponse response) throws RestApiException {
+        if (response.isValid() && response.hasResponseBody()) {
+            String responseBody = response.getResponseBody();
+            try {
+                JSONParser jsonParser = new JSONParser(JSONParser.DEFAULT_PERMISSIVE_MODE);
+                return (JSONObject) jsonParser.parse(responseBody);
+            } catch (net.minidev.json.parser.ParseException e) {
+                log.error("Error while parsing response body as Json " + responseBody, e);
+                throw new RestApiException(e);
+            }
+        }
+        throw new RestApiException("Invalid Response Body to parse as Json.");
+    }
+    
+    /**
+     * @param response
+     * @return
+     * @throws RestApiException
+     */
+    public JSONObject parseXMLToJSON(CloudResponse response) throws RestApiException {
+        if (response.isValid() && response.hasResponseBody()) {
+            String responseBody = response.getResponseBody();
+            responseBody = xmlToJsonConversion(responseBody);
+            try {
+            	if(!StringUtils.equalsIgnoreCase(responseBody, "\"\"")) {
+            		 JSONParser jsonParser = new JSONParser(JSONParser.DEFAULT_PERMISSIVE_MODE);
+                     return (JSONObject) jsonParser.parse(responseBody);
+            	}else {
+            		return null;
+            	}
+            } catch (net.minidev.json.parser.ParseException e) {
+                log.error("Error while parsing response body as Json " + responseBody, e);
+                throw new RestApiException(e);
+            }
+        }
+        throw new RestApiException("Invalid Response Body to parse as Json.");
+    }
+    
+    /**
+     * @param response
+     * @return
+     * @throws RestApiException
+     */
+    public JSONArray parseToJSONArray(CloudResponse response) 
+			throws RestApiException {
+		 if (response.isValid() && response.hasResponseBody()) {
+			 String responseBody = response.getResponseBody();
+			  try {
+	              JSONParser jsonParser = new JSONParser(JSONParser.DEFAULT_PERMISSIVE_MODE);
+	              return (JSONArray) jsonParser.parse(responseBody);
+	          } catch (net.minidev.json.parser.ParseException e) {
+	              log.error("Error while parsing response body as Json " + responseBody, e);
+	              throw new RestApiException(e);
+	          }
+		 }
+		 throw new RestApiException("Invalid Response Body to parse as Json.");
+	}
+
+	/**
+	 * @param subscriptionId
+	 * @return
+	 */
+	private String getListStorageAccountURL(String subscriptionId) {
+		return  (new StringBuilder(BlobStorageConstants.MANAGEMENT_API).
+				append(String.format(BlobStorageConstants.LIST_STORAGE_ACCOUNTS, 
+				subscriptionId))).toString();
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @return
+	 */
+	private String getListContainersURL(String storageAccount,String nextpageToken,int pageSize,String prefixQuery) {
+		StringBuilder sb = (new StringBuilder(String.format(BlobStorageConstants.BASE_STORAGE_API, 
+				storageAccount)).
+				append(BlobStorageConstants.LIST_CONTAINERS));
+		if(StringUtils.isNotBlank(nextpageToken)) {
+			sb.append("&marker="+nextpageToken);
+		}
+		if(pageSize > 0) {
+			sb.append("&maxresults="+pageSize);
+		}
+		if(StringUtils.isNotBlank(prefixQuery)) {
+			sb.append("&prefix="+prefixQuery);
+		}		
+		return sb.toString();
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param marker
+	 * @param maxRecords
+	 * @return
+	 */
+	private String getListBlobsURL(String storageAccount,String container,String marker,int maxRecords) {
+		StringBuilder sb = new StringBuilder(String.format(BlobStorageConstants.BASE_STORAGE_API,storageAccount));		
+		if(StringUtils.isNotBlank(marker)) {
+			sb.append(String.format(BlobStorageConstants.LIST_BLOBS_CONTINUE, 
+					container,maxRecords,marker));
+		}else {
+			sb.append(String.format(BlobStorageConstants.LIST_BLOBS, 
+					container,maxRecords));
+		}
+		return sb.toString();
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param blobPath
+	 * @return
+	 */
+	private String getBlobURL(String storageAccount,String container,String blobPath ) throws RestApiException {
+		try {
+			blobPath = URLEncoder.encode(blobPath, "UTF-8").replace("+", "%20");
+		} catch (UnsupportedEncodingException e) {
+			throw new RestApiException(e);
+		}
+		StringBuilder sb = new StringBuilder(String.format(BlobStorageConstants.BASE_STORAGE_API,storageAccount))
+				.append(String.format(BlobStorageConstants.BLOB_URL,container,blobPath));
+		return sb.toString();
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @return
+	 * @throws RestApiException
+	 */
+	private String getContainerURL(String storageAccount,String container) throws RestApiException {
+		StringBuilder sb = new StringBuilder(String.format(BlobStorageConstants.BASE_STORAGE_API,storageAccount))
+				.append(String.format(BlobStorageConstants.CONTAINER_METADATA,container));
+		return sb.toString();
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param queueName
+	 * @param noOfMessages
+	 * @param visibilityTimeoutInSeconds
+	 * @return
+	 */
+	private String getQueueMessagesFromURL(String storageAccount,String queueName,int noOfMessages,int visibilityTimeoutInSeconds) {
+		StringBuilder sb = new StringBuilder(String.format(BlobStorageConstants.BASE_QUEUE_API,storageAccount))
+				.append(String.format(BlobStorageConstants.GET_QUEUE_MESSAGES,queueName,noOfMessages,visibilityTimeoutInSeconds));
+		return sb.toString();
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param queueName
+	 * @param messageId
+	 * @param popId
+	 * @return
+	 */
+	private String deleteQueueMessageFromQueue(String storageAccount,String queueName,String messageId,String popId) {
+		StringBuilder sb = new StringBuilder(String.format(BlobStorageConstants.BASE_QUEUE_API,storageAccount))
+				.append(String.format(BlobStorageConstants.DELETE_QUEUE_MESSAGES,queueName,messageId,popId));
+		return sb.toString();
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param queueName
+	 * @return
+	 */
+	private String createQueueURL(String storageAccount,String queueName) {
+		StringBuilder sb = new StringBuilder(String.format(BlobStorageConstants.BASE_QUEUE_API,storageAccount))
+				.append(BlobStorageConstants.F_SLASH).append(queueName);
+		return sb.toString();
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @return
+	 */
+	private String getContainerACLURL(String storageAccount,String container) {
+		StringBuilder sb = new StringBuilder(String.format(BlobStorageConstants.BASE_STORAGE_API,storageAccount))
+				.append(String.format(BlobStorageConstants.CONTAINER_ACL,container));
+		return sb.toString();
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param resourceGroup
+	 * @param storageAccount
+	 * @return
+	 */
+	private String getSASTokenURL(String subscriptionId,String resourceGroup,String storageAccount) {
+		return  (new StringBuilder(BlobStorageConstants.MANAGEMENT_API).
+				append(String.format(BlobStorageConstants.GET_SAS_TOKEN_URL, 
+				subscriptionId,resourceGroup,storageAccount))).toString();
+	}
+	
+	/**
+	 * @param body
+	 * @param request
+	 * @param contentType
+	 */
+	private void populateHttpPostBody(String body,HttpPost request,String contentType) {
+		HttpEntity entity = null;
+		if(contentType.equalsIgnoreCase("xml")) {
+			entity = new StringEntity(body, ContentType.APPLICATION_XML);
+		}else {
+			entity = new StringEntity(body, ContentType.APPLICATION_JSON);
+		}
+		request.setEntity(entity);
+	}
+
+	/**
+	 * @param url
+	 * @param body
+	 * @param contentType
+	 * @return
+	 */
+	private HttpPost constructPostRequest(String url,String body,String contentType) {
+		HttpPost req = new HttpPost(url);
+		if(StringUtils.isNotEmpty(body)) {
+			populateHttpPostBody(body, req,contentType);
+		}
+		return req;
+	}
+	
+	/**
+	 * @param url
+	 * @return
+	 */
+	private HttpGet constructGETRequest(String url) {
+		//System.out.println("url :"+url);
+		HttpGet req = new HttpGet(url);
+		return req;
+	}
+	
+	/**
+	 * @param url
+	 * @return
+	 */
+	private HttpHead constructHeadRequest(String url) {
+		HttpHead req = new HttpHead(url);
+		return req;
+	}
+	
+	/**
+	 * @param url
+	 * @return
+	 */
+	private HttpPut constructPutRequest(String url) {
+		HttpPut req = new HttpPut(url);
+		return req;
+	}
+	/**
+	 * @param url
+	 * @return
+	 */
+	private HttpDelete constructHttpDelete(String url) {
+		HttpDelete req = new HttpDelete(url);
+		return req;
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @return
+	 */
+	public HttpGet listStorageAccountsReq(String subscriptionId) {
+		HttpGet listStorageAccountsReq = constructGETRequest(getListStorageAccountURL(subscriptionId));
+		return listStorageAccountsReq;
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @return
+	 */
+	public HttpGet listContainersReq(String storageAccount,String nextpageToken,int pageSize,String prefixQuery) {
+		
+		HttpGet listContainers = constructGETRequest(getListContainersURL(storageAccount,nextpageToken,pageSize,prefixQuery));
+		listContainers.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		return listContainers;
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param marker
+	 * @param maxRecords
+	 * @return
+	 */
+	public HttpGet listBlobsReq(String storageAccount,String container,String marker,int maxRecords) {
+		HttpGet listBlobs = constructGETRequest(getListBlobsURL(storageAccount,container,marker,maxRecords));
+		listBlobs.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		return listBlobs;
+	}
+	
+	
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param blobPath
+	 * @return
+	 * @throws RestApiException 
+	 */
+	public HttpHead getBlobPropertiesReq(String storageAccount,String container,String blobPath) throws RestApiException {
+		HttpHead blobPropertiesReq = constructHeadRequest(getBlobURL(storageAccount, container, blobPath));
+		blobPropertiesReq.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		return blobPropertiesReq;
+	}
+	
+	public HttpHead getContainerPropertiesReq(String storageAccount,String container) throws RestApiException {
+		HttpHead blobPropertiesReq = constructHeadRequest(getContainerURL(storageAccount, container));
+		blobPropertiesReq.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		return blobPropertiesReq;
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param blobPath
+	 * @return
+	 * @throws RestApiException 
+	 */
+	public HttpGet getBlobDownloadReq(String storageAccount,String container,String blobPath) throws RestApiException {
+		HttpGet blobDownloadReq = constructGETRequest(getBlobURL(storageAccount, container, blobPath));
+		blobDownloadReq.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		return blobDownloadReq;
+	}
+
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param blobPath
+	 * @return
+	 * @throws RestApiException 
+	 */
+	public HttpDelete getBlobDeleteReq(String storageAccount,String container,String blobPath,boolean peramanennt) throws  RestApiException{
+		String url = getBlobURL(storageAccount, container, blobPath);
+		if(peramanennt) {
+			url = url+"&deletetype=permanent";
+		}
+		HttpDelete blobDeleteReq = constructHttpDelete(url);
+		blobDeleteReq.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		blobDeleteReq.setHeader(BlobStorageConstants.X_MS_DELETE_SNAPSHOT,"include");
+		return blobDeleteReq;
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param resourceGroup
+	 * @param storageAccount
+	 * @return
+	 */
+	public HttpPost getStorageAccountSASTokenReq(String subscriptionId,String resourceGroup,String storageAccount) {
+		HttpPost sasTokenReq = constructPostRequest(getSASTokenURL(subscriptionId, resourceGroup, storageAccount)
+				,StringUtils.EMPTY,StringUtils.EMPTY);
+		sasTokenReq.setHeader(BlobStorageConstants.CONTENT_TYPE,BlobStorageConstants.APP_JSON);
+		return sasTokenReq;
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param queueName
+	 * @param noOfMessages
+	 * @param visibilityTimeoutInSeconds
+	 * @return
+	 */
+	public HttpGet getQueueMessagesRequest(String storageAccount,String queueName,int noOfMessages,int visibilityTimeoutInSeconds) {
+		HttpGet queueMessageReadReq = constructGETRequest(getQueueMessagesFromURL(storageAccount, queueName, noOfMessages, visibilityTimeoutInSeconds));
+		queueMessageReadReq.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		return queueMessageReadReq;
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param queueName
+	 * @param messageID
+	 * @param popId
+	 * @return
+	 */
+	public HttpDelete deleteQueueMessagesRequest(String storageAccount,String queueName,String messageID,String popId) {
+		HttpDelete queueMessageReadReq = constructHttpDelete(deleteQueueMessageFromQueue(storageAccount, queueName, messageID, popId));
+		queueMessageReadReq.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		return queueMessageReadReq;
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param resourceGroupId
+	 * @param StorageAccount
+	 * @return
+	 */
+	private String getCreateStorageAccountURL(String subscriptionId,String resourceGroupId,String StorageAccount) {
+		StringBuilder sb = new StringBuilder(BlobStorageConstants.MANAGEMENT_API)
+				.append(String.format(BlobStorageConstants.CREATE_SA_URL,subscriptionId,resourceGroupId,StorageAccount));
+		return sb.toString();
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param resourceGroupId
+	 * @param StorageAccount
+	 * @param body
+	 * @return
+	 */
+	public HttpPut createStorageAccountReq(String subscriptionId,String resourceGroupId,String StorageAccount,JSONObject body) {
+		HttpPut createReq = constructPutRequest(getCreateStorageAccountURL(subscriptionId,resourceGroupId,StorageAccount));
+		createReq.setHeader(BlobStorageConstants.CONTENT_TYPE,BlobStorageConstants.APP_JSON);
+		HttpEntity entity = new StringEntity(body.toJSONString(), ContentType.APPLICATION_JSON);
+		createReq.setEntity(entity);
+		return createReq;
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @return
+	 */
+	private String getCreateContainerURL(String storageAccount,String container) {
+		StringBuilder sb = new StringBuilder(String.format(BlobStorageConstants.BASE_STORAGE_API,storageAccount))
+				.append(String.format(BlobStorageConstants.CREATE_CONTAINER_URL,container));
+		return sb.toString();
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param queueName
+	 * @return
+	 */
+	public HttpPut createQueueRequest(String storageAccount,String queueName) {
+		HttpPut createQueue = constructPutRequest(createQueueURL(storageAccount, queueName));
+		createQueue.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		return createQueue;
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @return
+	 */
+	public HttpPut createContainerRequest(String storageAccount,String container) {
+		HttpPut createContainer = constructPutRequest(getCreateContainerURL(storageAccount, container));
+		createContainer.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		return createContainer;
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param rgName
+	 * @return
+	 */
+	public String createresourceGroupURL(String subscriptionId,String rgName) {
+		StringBuilder sb = new StringBuilder(BlobStorageConstants.MANAGEMENT_API)
+				.append(String.format(BlobStorageConstants.CREATE_RG_URL,subscriptionId,rgName));
+		return sb.toString();
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param rgName
+	 * @return
+	 */
+	public HttpPut createresourceGroupRequest(String subscriptionId,String rgName) {
+		HttpPut createresourceGroup = constructPutRequest(getCreateContainerURL(subscriptionId, rgName));
+		return createresourceGroup;
+	}
+	
+	/**
+	 * @param xml
+	 * @return
+	 * @throws RestApiException
+	 */
+	private String xmlToJsonConversion(String xml) throws RestApiException {
+		String jsonString = null;
+		try {
+			 XmlMapper xmlMapper = new XmlMapper();
+			 JsonNode node = xmlMapper.readTree(xml.getBytes());
+			 ObjectMapper jsonMapper = new ObjectMapper();
+			 jsonString = jsonMapper.writeValueAsString(node);
+		 }catch(Exception e) {
+			 log.error("Error while parsing response body  " + xml, e);
+             throw new RestApiException(e);
+		 }
+		return jsonString;
+	}
+	
+	/**
+	 * @param key
+	 * @param input
+	 * @return
+	 */
+	private String getHMAC256(String key, String input) {
+	    Mac sha256_HMAC = null;
+	    String hash = null;
+	    try {
+	    	sha256_HMAC = Mac.getInstance(BlobStorageConstants.HMAC_SHA256);
+	    	byte[] b = org.apache.commons.codec.binary.Base64.decodeBase64(key);
+	        SecretKeySpec secret_key = new SecretKeySpec(b, BlobStorageConstants.HMAC_SHA256);
+	        sha256_HMAC.init(secret_key);
+            hash = org.apache.commons.codec.binary.Base64.encodeBase64String(sha256_HMAC.doFinal(input.getBytes()));
+	    } catch (InvalidKeyException e) {
+	        e.printStackTrace();
+	    } catch (NoSuchAlgorithmException e) {
+	        e.printStackTrace();
+	   } catch (IllegalStateException e) {
+	        e.printStackTrace();
+	    }
+	    return hash;
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param sasToken
+	 * @param date
+	 * @return
+	 */
+	public HttpGet getContainerACL(String storageAccount,String container,String sasToken,String date) {
+		HttpGet getContainerACLReq = constructGETRequest(getContainerACLURL(storageAccount, container));
+		String inputData = String.format(BlobStorageConstants.CONTAINER_ACL_SIG,BlobStorageConstants.GET,date,storageAccount,container);
+		String hash = getHMAC256(sasToken, inputData);
+		getContainerACLReq.setHeader(BlobStorageConstants.AUTHORIZATION, String.format(BlobStorageConstants.SAS_AUTH_HEADER,storageAccount,hash));
+		getContainerACLReq.setHeader(BlobStorageConstants.DATE, date);
+		getContainerACLReq.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		return getContainerACLReq;
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param sasToken
+	 * @param date
+	 * @param inputBody
+	 * @return
+	 */
+	public HttpPut putContainerACL(String storageAccount,String container,String sasToken,String date,String inputBody) {
+		HttpPut putContainerACLReq = constructPutRequest(getContainerACLURL(storageAccount, container));
+		String contentType = StringUtils.EMPTY;String contnentLength =  StringUtils.EMPTY;
+		if(StringUtils.isNotBlank(inputBody)) {
+			contentType = "application/xml";
+			contnentLength = String.valueOf(inputBody.length());
+			HttpEntity entity = new StringEntity(inputBody, ContentType.APPLICATION_XML);
+			putContainerACLReq.setEntity(entity);
+			putContainerACLReq.setHeader(BlobStorageConstants.CONTENT_TYPE, contentType);
+		}
+		String inputData = String.format(BlobStorageConstants.PUT_CONTAINER_ACL_SIG,BlobStorageConstants.PUT,contnentLength,contentType,date,storageAccount,container);
+		String hash = getHMAC256(sasToken, inputData);
+		putContainerACLReq.addHeader(BlobStorageConstants.AUTHORIZATION, String.format(BlobStorageConstants.SAS_AUTH_HEADER,storageAccount,hash));
+		putContainerACLReq.addHeader(BlobStorageConstants.DATE, date);
+		putContainerACLReq.addHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		return putContainerACLReq;
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param eventsFilter
+	 * @return
+	 */
+	private String getEventsReqURL(String subscriptionId,String eventsFilter) {
+		return  (new StringBuilder(BlobStorageConstants.MANAGEMENT_API).
+				append(String.format(BlobStorageConstants.EVENTS_API, 
+				subscriptionId,eventsFilter))).toString();
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param eventsFilter
+	 * @return
+	 */
+	public HttpGet getEventsReq(String subscriptionId,String eventsFilter,String url) {
+		if(StringUtils.isNotBlank(url)) {
+			HttpGet req = constructGETRequest(url);
+			return req;
+		}else {
+			HttpGet req = constructGETRequest(getEventsReqURL(subscriptionId, eventsFilter));
+			return req;
+		}
+			
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param resourceGroupId
+	 * @param StorageAccount
+	 * @param token
+	 * @return
+	 */
+	private String getEventsSubscriptionURL(String subscriptionId,String resourceGroupId,String StorageAccount,String token) {
+		if(StringUtils.isNotBlank(token)) {
+			return  getDecodedString(token);
+		}else {
+			return  (new StringBuilder(BlobStorageConstants.MANAGEMENT_API).
+					append(String.format(BlobStorageConstants.LIST_EVENTS_SUBSCRIPTION_API, 
+					subscriptionId,resourceGroupId,StorageAccount))).toString();	
+		}
+		
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param resourceGroupId
+	 * @param StorageAccount
+	 * @param token
+	 * @return
+	 */
+	public HttpGet getListEventsSubscriptionReq(String subscriptionId,String resourceGroupId,String StorageAccount,String token) {
+		HttpGet req = constructGETRequest(getEventsSubscriptionURL(subscriptionId, resourceGroupId, StorageAccount, token));
+		return req;
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param resourceGroupId
+	 * @param StorageAccount
+	 * @param subscriptionName
+	 * @return
+	 */
+	private String getCreateSubscriptionAPIURL(String subscriptionId,String resourceGroupId,String StorageAccount,String subscriptionName) {
+		return  (new StringBuilder(BlobStorageConstants.MANAGEMENT_API).
+				append(String.format(BlobStorageConstants.CREATE_EVENTS_SUBSCRIPTION_API, 
+				subscriptionId,resourceGroupId,StorageAccount,subscriptionName))).toString();
+	}
+	
+	/**
+	 * @param subscriptionId
+	 * @param resourceGroupId
+	 * @param StorageAccount
+	 * @param subscriptionName
+	 * @param data
+	 * @return
+	 */
+	public HttpPut createEVentsSubscriptionReq(String subscriptionId,String resourceGroupId,String StorageAccount,String subscriptionName,JSONObject data) {
+		HttpPut req = constructPutRequest(getCreateSubscriptionAPIURL(subscriptionId, resourceGroupId, StorageAccount, subscriptionName));
+		req.setHeader(BlobStorageConstants.CONTENT_TYPE,BlobStorageConstants.APP_JSON);
+		String jsonBody = getCreateEventsSubscriptionBody(data,resourceGroupId,subscriptionId);
+		HttpEntity entity = new StringEntity(jsonBody, ContentType.APPLICATION_JSON);
+		req.setEntity(entity);
+		return req;
+	}
+	
+	/**
+	 * @param data
+	 * @return
+	 */
+	public String getCreateEventsSubscriptionBody(JSONObject data,String resourceGroupId,String subscriptionId) {  
+		JSONObject body = new JSONObject();
+		body.put("name", data.getAsString("subscriptionName"));
+		JSONObject properties = new JSONObject();
+		properties.put("topic", data.getAsString("topic"));
+		properties.put("eventDeliverySchema", "EventGridSchema");
+		properties.put("labels", new JSONArray());
+		JSONObject retryPolicy = new JSONObject();
+		retryPolicy.put("maxDeliveryAttempts", "30");
+		retryPolicy.put("eventTimeToLiveInMinutes", "1440");
+		properties.put("retryPolicy",retryPolicy);
+		JSONObject filter = new JSONObject();
+		JSONArray includedEventTypes = new JSONArray();
+		includedEventTypes.add("Microsoft.Storage.BlobCreated");
+		includedEventTypes.add("Microsoft.Storage.BlobDeleted");
+		includedEventTypes.add("Microsoft.Storage.DirectoryCreated");
+		includedEventTypes.add("Microsoft.Storage.DirectoryDeleted");
+		includedEventTypes.add("Microsoft.Storage.BlobRenamed");
+		includedEventTypes.add("Microsoft.Storage.DirectoryRenamed");
+		includedEventTypes.add("Microsoft.Storage.BlobTierChanged");
+		includedEventTypes.add("Microsoft.Storage.BlobInventoryPolicyCompleted");
+		includedEventTypes.add("Microsoft.Storage.AsyncOperationInitiated");
+		includedEventTypes.add("Microsoft.Storage.LifecyclePolicyCompleted");
+		filter.put("includedEventTypes", includedEventTypes);
+		JSONArray advancedFilters = new JSONArray();
+		JSONObject blobFilter = new JSONObject();
+		blobFilter.put("operatorType", "StringNotIn");
+		blobFilter.put("key", "data.blobType");
+		JSONArray values = new JSONArray();
+		values.add("PageBlob");
+		values.add("AppendBlob");
+		blobFilter.put("values", values);
+		advancedFilters.add(blobFilter);
+		filter.put("advancedFilters", advancedFilters);
+		filter.put("enableAdvancedFilteringOnArrays", true);
+		properties.put("filter", filter);
+		JSONObject deadLetterDestination = new JSONObject();
+		deadLetterDestination.put("endpointType", "StorageBlob");
+		JSONObject destination = new JSONObject();
+		destination.put("endpointType", "StorageQueue");
+		JSONObject destinationProperties = new JSONObject();
+		destinationProperties.put("resourceId",String.format(BlobStorageConstants.DESTINATION_SA_RESOURCE_ID, 
+				subscriptionId,resourceGroupId,data.getAsString("queueDestinationSA")) );
+		destinationProperties.put("queueName", data.getAsString("queueName"));
+		destinationProperties.put("queueMessageTimeToLiveInSeconds", "-1");
+		destination.put("properties", destinationProperties);
+		properties.put("destination", destination);
+		body.put("properties", properties);
+		return body.toJSONString();
+	}
+	
+	/**
+	 * @param fileId
+	 * @param storageAccount
+	 * @param container
+	 * @param path
+	 */
+	public void parseFIleId(String fileId,String storageAccount,String container,String path) {
+		fileId = getDecodedString(fileId);
+		String array[] = StringUtils.split(fileId, SEPARATOR);
+		if(array.length > 0) {
+			storageAccount = array[0];
+		}
+		
+		if(array.length > 1) {
+			container = array[1];
+		}
+		
+		if(array.length > 2) {
+			path = array[2];
+		}
+	}
+	
+	/**
+	 * @param file
+	 * @param headers
+	 * @param id
+	 * @param path
+	 * @param storageAccount
+	 * @param container
+	 */
+	public void populateFileMetaData(FileInfo file, Header[] headers,String id,String path,String storageAccount,String container) {
+		JSONObject raw = new JSONObject();
+		for(Header header : headers) {
+			raw.put(header.getName(), header.getValue());
+		}
+		boolean leaseStatus = false;
+		String lease = raw.getAsString("x-ms-lease-state");
+		if(StringUtils.isNotBlank(lease) && StringUtils.equalsIgnoreCase(lease, "leased")) {
+			leaseStatus = true;
+		}
+		String[] array = path.split("/");
+		Path path1 = Paths.get(path);
+		if(path1.getParent() != null) {
+			file.setPath(path1.getParent().toString().replace("\\", "/"));
+		}
+		file.setType("blob");
+		file.setId(id);
+		file.setName(array[array.length-1]);
+		file.setRaw(raw);
+		file.setSize(Long.parseLong(raw.getAsString("Content-Length")));
+		file.setDownloadable(true);
+		file.setLeaseStatus(leaseStatus);
+		file.setAncestors(populateAncestors(storageAccount, container, path1));
+	}
+	
+	
+	public void populateFolderMetaData(FileInfo file, Header[] headers,String id,String storageAccount,String container) {
+		JSONObject raw = new JSONObject();
+		for(Header header : headers) {
+			raw.put(header.getName(), header.getValue());
+		}
+		file.setType("container");
+		file.setId(id);
+		file.setPath(container);
+		file.setName(container);
+		file.setRaw(raw);
+		Ancestors[] arr = new Ancestors[2];
+		Ancestors saParent = new Ancestors();
+		saParent.setId(getEncodedString(storageAccount));
+		saParent.setName(storageAccount);
+		saParent.setId_type("StorageAccount");
+		arr[0] = saParent;
+		file.setAncestors(arr);
+	}
+	
+	
+	/**
+	 * @param responseJson
+	 * @param response
+	 * @param storageAccount
+	 * @param container
+	 */
+	public void populateListFiles(JSONObject responseJson,StorageListFileMetadataResponse response,
+			String storageAccount,String container) {
+		JSONObject raw = (JSONObject)responseJson.get("Blobs");
+		JSONArray blobs = new JSONArray();
+		if(raw.get("Blob") instanceof JSONArray) {
+			blobs = (JSONArray)raw.get("Blob");
+		}else {
+			blobs.add(raw.get("Blob"));
+		}
+		Ancestors ancestorsArray[] = new Ancestors[2];
+		Ancestors saParent = new Ancestors();
+		saParent.setId(getEncodedString(storageAccount));
+		saParent.setName(storageAccount);
+		saParent.setId_type("StorageAccount");
+		Ancestors containerParent = new Ancestors();
+		containerParent.setId(constructId(storageAccount,container));
+		containerParent.setName(container);
+		containerParent.setId_type("Container");
+		ancestorsArray[0] = containerParent;
+		ancestorsArray[1] = saParent;
+		
+		List<FileInfo> objects = new ArrayList<FileInfo>();
+		for(Object obj : blobs) {
+			JSONObject rawBlob = (JSONObject)obj;
+			FileInfo file = new FileInfo();
+			file.setType("blob");
+			Path path1 = Paths.get(rawBlob.getAsString("Name"));
+			String[] array = rawBlob.getAsString("Name").split("/");
+			if(path1.getParent() != null) {
+				file.setPath(path1.getParent().toString().replace("\\", "/"));
+				file.setAncestors(populateAncestors(saParent, containerParent, path1));
+			}else {
+				file.setAncestors(ancestorsArray);
+			}
+			file.setName(array[array.length-1]);
+			file.setId(constructId(storageAccount, container, rawBlob.getAsString("Name")));
+			file.setRaw(rawBlob);
+			JSONObject properties = (JSONObject)rawBlob.get("Properties");
+			file.setSize(Long.parseLong(properties.getAsString("Content-Length")));
+			file.setDownloadable(true);
+			
+			objects.add(file);
+		}
+		response.setCount(objects.size());
+		response.setObjects(objects);
+		String cursor = responseJson.getAsString("NextMarker");
+		if(StringUtils.isNotBlank(cursor)) {
+			response.setHasMoreElements(true);
+			response.setNext_page(cursor);
+		}else {
+			response.setHasMoreElements(false);
+		}
+	}
+	
+	/**
+	 * @param sa
+	 * @param container
+	 * @param path
+	 * @return
+	 */
+	public String constructId(String...args) {
+		StringBuilder sb = new StringBuilder();
+		for(String s : args) {
+			sb.append(SEPARATOR).append(s);
+		}
+		return getEncodedString(sb.substring(3));
+	}
+	
+	/**
+	 * @param input
+	 * @return
+	 */
+	public String getEncodedString(String input) {
+		return Base64.getEncoder().encodeToString(input.getBytes());
+	}
+	
+	/**
+	 * @param input
+	 * @return
+	 */
+	public String getDecodedString(String input) {
+		try {
+			byte[] decodedBytes = Base64.getDecoder().decode(input);
+			return new String(decodedBytes);
+		}catch(Exception e) {
+			return input;
+		}
+	}
+	
+	/**
+	 * @param response
+	 * @return
+	 * @throws RestApiException
+	 */
+	public JSONObject parseToJSON(String response) 
+			throws RestApiException {
+		try {
+			JSONObject json = null;
+			JSONParser jsonParser = new JSONParser(JSONParser.DEFAULT_PERMISSIVE_MODE);
+			json = (JSONObject) jsonParser.parse(response);
+			return json;
+		}catch(net.minidev.json.parser.ParseException e) {
+			log.error("Error while parsing response body as Json " + response, e);
+			throw new RestApiException(e);
+		}
+	}
+	
+	/**
+	 * @return
+	 */
+	public String getTimeInUtcString() {
+		Date date = new Date();
+		String format = "EEE, dd MMM yyyy HH:mm:ss z";
+		SimpleDateFormat sdf = new SimpleDateFormat(format);
+		TimeZone utc = TimeZone.getTimeZone("GMT");
+		sdf.setTimeZone(utc);
+		return sdf.format(date);
+	}
+
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param id
+	 * @param file
+	 */
+	public void populatePublicURLForBlob(String storageAccount,String container,String id,FileInfo file) {
+		String URL = String.format(BlobStorageConstants.CONTAINER_PUBLIC_URL,storageAccount,container);
+		file.setId(id);
+		Ancestors[] arr = new Ancestors[2];
+		Ancestors saParent = new Ancestors();
+		saParent.setId(getEncodedString(storageAccount));
+		saParent.setName(storageAccount);
+		saParent.setId_type("StorageAccount");
+		arr[0] = saParent;
+		file.setAncestors(arr);
+		file.setType("Container");
+		SharedLinkInfo link = new SharedLinkInfo();
+		link.setUrl(URL);
+		List<SharedLinkInfo> sharedLinkInfos = new ArrayList<SharedLinkInfo>();
+		sharedLinkInfos.add(link);
+		file.setObjects(sharedLinkInfos);
+	}
+	
+	public FileInfo constructNoCopyDownloadFileResponse(final @NonNull HttpResponse cloudResponse,FileInfo fileInfo) throws RestApiException {
+		HttpEntity responseEntity = null;
+		try {
+			responseEntity = cloudResponse.getEntity();
+			fileInfo.setMime_type(ContentType.getOrDefault(responseEntity).getMimeType());
+			fileInfo.setSize(responseEntity.getContentLength());
+			fileInfo.setResource(new InputStreamResource(responseEntity.getContent()));
+			log.debug("Storage response: {}", fileInfo);
+		} catch (IOException ioe) {
+			log.error("Error occured while creating download response :"+ioe.getMessage(),ioe);
+			throw new RestApiException(ioe);
+		}
+		return fileInfo;
+	}
+	
+	public boolean eventIsQualifiedOrNot(String eventName) {
+		return qualifiedEvents.contains(eventName);
+	}
+	
+	/**
+	 * init.
+	 */
+	@PostConstruct
+	public void init() {
+		qualifiedEvents.addAll(Arrays.stream(events.split(",")).collect(Collectors.toSet()));
+	}
+	
+	/**
+	 * destroy.
+	 */
+	@PreDestroy
+	public void destroy() {
+		qualifiedEvents.clear();
+		qualifiedEvents = null;
+	}
+
+	/**
+	 * @param jsonResponse
+	 */
+	public JSONArray populateListStorageAccounts(JSONObject jsonResponse) {
+		JSONArray retVal = new JSONArray();
+		Object obj1 = jsonResponse.get("value");
+		JSONArray storageAccounts ;
+		if(obj1 instanceof JSONArray) {
+			storageAccounts = (JSONArray)jsonResponse.get("value");
+		}else {
+			JSONObject rawResp  = (JSONObject)obj1;
+			storageAccounts = new JSONArray();
+			storageAccounts.add(rawResp);
+		}
+		for(Object obj : storageAccounts) {
+			JSONObject rawData = (JSONObject)obj;
+			String array[] = rawData.getAsString("id").split("/");
+			JSONObject sa = new JSONObject();
+			sa.put("rawId",rawData.getAsString("id"));
+			sa.put("id", getEncodedString(rawData.getAsString("name")));
+			sa.put("name",rawData.getAsString("name"));
+			sa.put("resourceGroupName", array[4]);
+			sa.put("kind", rawData.getAsString("kind"));
+			JSONObject properties = (JSONObject)rawData.get("properties");
+			String isHnsEnabledStr = properties.getAsString("isHnsEnabled");
+			boolean isHnsEnabled = StringUtils.isNotBlank(isHnsEnabledStr) ? Boolean.valueOf(isHnsEnabledStr) : false;
+			if(StringUtils.containsAny(rawData.getAsString("kind"), "StorageV2","BlockBlobStorage") && !isHnsEnabled)
+				sa.put("isValid", true);
+			else 
+				sa.put("isValid", false);
+			sa.put("location", rawData.getAsString("location"));
+			sa.put("publicNetworkAccess", properties.getAsString("publicNetworkAccess"));
+			sa.put("raw",rawData);
+			retVal.add(sa);
+		}
+		return retVal;
+	}
+	
+	/**
+	 * @param jsonResponse
+	 * @param storageAccount
+	 */
+	public JSONObject populateListContainers(JSONObject jsonResponse,String storageAccount) {
+		JSONArray arrayData = new JSONArray();
+		if(StringUtils.isNotBlank(jsonResponse.getAsString("Containers"))) {
+			JSONObject containers = (JSONObject)jsonResponse.get("Containers");
+			Object obj = containers.get("Container");
+			if(obj instanceof JSONArray) {
+				JSONArray arr = (JSONArray)obj;
+				for(Object rawObj : arr) {
+					JSONObject rawJsonObj = (JSONObject)rawObj;
+					rawJsonObj.put("id", constructId(storageAccount,rawJsonObj.getAsString("Name")));
+					arrayData.add(rawJsonObj);
+				}
+				
+			}else {
+				JSONObject rawJsonObj = (JSONObject)obj;
+				rawJsonObj.put("id", constructId(storageAccount,rawJsonObj.getAsString("Name")));
+				arrayData.add(rawJsonObj);
+			}
+		}
+		JSONObject retObj = new JSONObject();
+		retObj.put("Containers", arrayData);
+		retObj.put("nextPageToken",jsonResponse.getAsString("NextMarker"));
+		retObj.put("prefixSearchString",jsonResponse.getAsString("Prefix"));
+		retObj.put("pageSize",jsonResponse.getAsString("MaxResults"));
+		retObj.put("noOfRecords",arrayData.size());
+		return retObj;
+	}
+	
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param blobPath
+	 * @return
+	 * @throws RestApiException
+	 */
+	public HttpPut getBlobCreateReq(String storageAccount,String container,String blobPath,ContentType contentType,String blobType,String accessTier) throws  RestApiException{
+		String url = getBlobURL(storageAccount, container, blobPath);
+		HttpPut blobCreateReq = constructPutRequest(url);
+		blobCreateReq.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		blobCreateReq.setHeader(BlobStorageConstants.X_MS_BLOB_TYPE,blobType);
+		if(StringUtils.isNotBlank(accessTier)) {
+			blobCreateReq.setHeader(BlobStorageConstants.ACCESS_TIER,accessTier);
+		}
+		return blobCreateReq;
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param paths
+	 * @return
+	 */
+	public Ancestors[] populateAncestors(String storageAccount,String container,Path paths) {
+		List<Ancestors> ancestors = new ArrayList<Ancestors>();
+		Ancestors saParent = new Ancestors();
+		saParent.setId(getEncodedString(storageAccount));
+		saParent.setName(storageAccount);
+		saParent.setId_type("StorageAccount");
+		Ancestors containerParent = new Ancestors();
+		containerParent.setId(constructId(storageAccount,container));
+		containerParent.setName(container);
+		containerParent.setId_type("Container");
+		while(paths.getParent() != null) {
+			paths = paths.getParent();
+			if(paths != null && paths.getFileName() != null) {
+				Ancestors ancestor = new Ancestors();
+				ancestor.setName(paths.getFileName().toString());
+				ancestor.setId(ancestor.getName());
+				ancestor.setId_type("Folder");
+				ancestors.add(ancestor);
+			}
+		}
+		ancestors.add(containerParent);
+		ancestors.add(saParent);
+		Ancestors[] arr = new Ancestors[ancestors.size()];
+		return ancestors.toArray(arr);
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param paths
+	 * @return
+	 */
+	public Ancestors[] populateAncestors(Ancestors storageAccount,Ancestors container,Path paths) {
+		List<Ancestors> ancestors = new ArrayList<Ancestors>();
+		while(paths.getParent() != null) {
+			paths = paths.getParent();
+			if(paths != null && paths.getFileName() != null) {
+				Ancestors ancestor = new Ancestors();
+				ancestor.setName(paths.getFileName().toString());
+				ancestor.setId(ancestor.getName());
+				ancestor.setId_type("Folder");
+				ancestors.add(ancestor);
+			}
+		}
+		ancestors.add(container);
+		ancestors.add(storageAccount);
+		Ancestors[] arr = new Ancestors[ancestors.size()];
+		return ancestors.toArray(arr);
+	}
+	
+	/**
+	 * @param storageAccount
+	 * @param container
+	 * @param blobPath
+	 * @param destStorageAccount
+	 * @param destContainer
+	 * @param destBlobPath
+	 * @return
+	 * @throws RestApiException
+	 */
+	public HttpPut getBlobMoveReq(String storageAccount,String container,String blobPath,String destStorageAccount,String destContainer,String destBlobPath) throws  RestApiException{
+		String url = getBlobURL(storageAccount, container, blobPath);
+		String destinationUrl = getBlobURL(destStorageAccount, destContainer, destBlobPath);
+		HttpPut blobCreateReq = constructPutRequest(destinationUrl);
+		blobCreateReq.setHeader(BlobStorageConstants.X_MS_VERSION,BlobStorageConstants.VERSION_22_10_02);
+		blobCreateReq.setHeader(BlobStorageConstants.X_MS_BLOB_TYPE,BlobStorageConstants.BLOCK_BLOB);
+		blobCreateReq.setHeader(BlobStorageConstants.X_MS_COPY_SOURCE,url);
+		return blobCreateReq;
+	}
+	
+	/**
+	 * @param message
+	 * @return
+	 */
+	public ApiErrorResponse newBadRequestError(String message) {
+        return newApiErrorResponse(HttpStatus.BAD_REQUEST, "Malformed Request", message);
+    }
+ 
+	/**
+	 * @param httpStatus
+	 * @param errorCode
+	 * @param message
+	 * @return
+	 */
+	public ApiErrorResponse newApiErrorResponse(HttpStatus httpStatus, String errorCode, String message) {
+	    return ApiErrorResponse.builder().httpStatus(httpStatus).errorCode(errorCode).message(message).build();
+	}
+
+	/**
+	 * @param message
+	 * @return
+	 */
+	public ApiErrorResponse newInternalServerError(String message) {
+	    return newApiErrorResponse(HttpStatus.INTERNAL_SERVER_ERROR, "internal_server_error", message);
+	}
+
+	/**
+	 * @param httpStatus
+	 * @param message
+	 * @return
+	 */
+	public ApiErrorResponse newApiErrorResponse(HttpStatus httpStatus, String message) {
+	    return ApiErrorResponse.builder().httpStatus(httpStatus).message(message).build();
+	}
+}
